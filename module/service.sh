@@ -57,6 +57,15 @@ if [ -n "$UIDS" ]; then
     echo "$UIDS" > "$PROC_TARGETS"
     count="$(echo "$UIDS" | wc -l)"
     log -t vpnhide "loaded $count target UIDs into kernel module"
+
+    # Also write to a file readable by system_server for the
+    # LSPosed system_server hooks (SELinux blocks system_server
+    # from reading /proc/vpnhide_targets directly).
+    SS_UIDS_FILE="/data/system/vpnhide_uids.txt"
+    echo "$UIDS" > "$SS_UIDS_FILE"
+    chmod 644 "$SS_UIDS_FILE"
+    chcon u:object_r:system_data_file:s0 "$SS_UIDS_FILE" 2>/dev/null
+    log -t vpnhide "wrote UIDs to $SS_UIDS_FILE for system_server"
 else
     log -t vpnhide "no UIDs resolved from targets.txt"
 fi
