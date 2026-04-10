@@ -1,0 +1,1 @@
+cmd_/home/okhsunrog/code/vpnhide-kmod/vpnhide_kmod.usyms := /home/okhsunrog/tmp_zfs/kernel_pixel_8pro/prebuilts/clang/host/linux-x86/clang-r487747c/bin/llvm-nm /home/okhsunrog/code/vpnhide-kmod/vpnhide_kmod.o | sed -n 's/^  *U //p' > /home/okhsunrog/code/vpnhide-kmod/vpnhide_kmod.usyms

@@ -1,0 +1,1 @@
+cmd_/home/okhsunrog/code/vpnhide-kmod/vpnhide_kmod.mod := printf '%s\n'   vpnhide_kmod.o | awk '!x[$$0]++ { print("/home/okhsunrog/code/vpnhide-kmod/"$$0) }' > /home/okhsunrog/code/vpnhide-kmod/vpnhide_kmod.mod

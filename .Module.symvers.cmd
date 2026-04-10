@@ -1,0 +1,1 @@
+cmd_/home/okhsunrog/code/vpnhide-kmod/Module.symvers :=  sed 's/ko$$/o/'  /home/okhsunrog/code/vpnhide-kmod/modules.order | scripts/mod/modpost -m  -E    -o /home/okhsunrog/code/vpnhide-kmod/Module.symvers -n -e -i Module.symvers -T - 
