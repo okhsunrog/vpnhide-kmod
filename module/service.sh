@@ -21,22 +21,36 @@ if [ ! -f "$TARGETS_FILE" ]; then
     exit 0
 fi
 
-# Resolve package names to UIDs
-UIDS=""
-while IFS= read -r line; do
-    line="$(echo "$line" | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')"
-    [ -z "$line" ] && continue
-    echo "$line" | grep -q '^#' && continue
+# Get all packages with UIDs in one call
+ALL_PACKAGES="$(pm list packages -U 2>/dev/null)"
 
-    uid="$(pm list packages -U "$line" 2>/dev/null | grep "^package:$line " | sed 's/.*uid://')"
+# Resolve each target package name to its UID
+UIDS=""
+while IFS= read -r line || [ -n "$line" ]; do
+    # Trim whitespace
+    pkg="$(echo "$line" | tr -d '[:space:]')"
+    [ -z "$pkg" ] && continue
+    # Skip comments
+    case "$pkg" in \#*) continue ;; esac
+
+    # Find UID: pm list packages -U outputs "package:<name> uid:<uid>"
+    uid="$(echo "$ALL_PACKAGES" | grep "^package:${pkg} " | sed 's/.*uid://')"
     if [ -n "$uid" ]; then
-        UIDS="$UIDS$uid
-"
+        if [ -z "$UIDS" ]; then
+            UIDS="$uid"
+        else
+            UIDS="${UIDS}
+${uid}"
+        fi
+    else
+        log -t vpnhide "package not found: $pkg"
     fi
 done < "$TARGETS_FILE"
 
 if [ -n "$UIDS" ]; then
     echo "$UIDS" > "$PROC_TARGETS"
-    count="$(echo "$UIDS" | grep -c .)"
+    count="$(echo "$UIDS" | wc -l)"
     log -t vpnhide "loaded $count target UIDs into kernel module"
+else
+    log -t vpnhide "no UIDs resolved from targets.txt"
 fi

@@ -176,9 +176,11 @@ static int dev_ioctl_entry(struct kretprobe_instance *ri,
 			   struct pt_regs *regs)
 {
 	struct dev_ioctl_data *data = (void *)ri->data;
+	unsigned int cmd;
 
 	/* arm64: x0=net, x1=cmd, x2=arg */
-	data->cmd = (unsigned int)regs->regs[1];
+	cmd = (unsigned int)regs->regs[1];
+	data->cmd = cmd;
 	data->arg = (void __user *)regs->regs[2];
 
 	if (!is_target_uid())

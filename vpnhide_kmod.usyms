@@ -1,4 +1,5 @@
 __arch_copy_from_user
+__arch_copy_to_user
 __check_object_size
 __kmalloc
 __stack_chk_fail
@@ -22,5 +23,6 @@ seq_read
 single_open
 single_release
 strchr
+strncmp
 strstr
 unregister_kretprobe

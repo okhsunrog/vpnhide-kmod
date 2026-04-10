@@ -22,6 +22,8 @@ __section(".gnu.linkonce.this_module") = {
 	.arch = MODULE_ARCH_INIT,
 };
 
+MODULE_INFO(scmversion, "ga868bca90036-dirty");
+
 #ifdef CONFIG_RETPOLINE
 MODULE_INFO(retpoline, "Y");
 #endif
@@ -34,14 +36,17 @@ __used __section("__versions") = {
 	{ 0x524767b, "proc_create" },
 	{ 0xce01cfc4, "proc_remove" },
 	{ 0xce598ef2, "unregister_kretprobe" },
+	{ 0x1e6d26a8, "strstr" },
 	{ 0x1348649e, "alt_cb_patch_nops" },
 	{ 0x4b0a3f52, "gic_nonsecure_priorities" },
 	{ 0x2be0c009, "__arch_copy_from_user" },
-	{ 0x1e6d26a8, "strstr" },
-	{ 0xc2c193d2, "__stack_chk_fail" },
+	{ 0x9a85eebb, "__arch_copy_to_user" },
 	{ 0x79e4c52b, "cpu_hwcaps" },
+	{ 0xdcb764ad, "memset" },
+	{ 0xc2c193d2, "__stack_chk_fail" },
 	{ 0xba8fbd64, "_raw_spin_lock" },
 	{ 0xb5b54b34, "_raw_spin_unlock" },
+	{ 0x5a921311, "strncmp" },
 	{ 0x4adb51eb, "single_open" },
 	{ 0xeb233a45, "__kmalloc" },
 	{ 0x88db9f48, "__check_object_size" },
@@ -49,7 +54,6 @@ __used __section("__versions") = {
 	{ 0x349cba85, "strchr" },
 	{ 0x4829a47e, "memcpy" },
 	{ 0x37a0cba, "kfree" },
-	{ 0xdcb764ad, "memset" },
 	{ 0xcbd4898c, "fortify_panic" },
 	{ 0x4be4820, "seq_printf" },
 	{ 0xd963f308, "seq_read" },
