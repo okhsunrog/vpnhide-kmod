@@ -1,0 +1,10 @@
+*.o
+*.mod
+*.mod.c
+*.mod.o
+Module.symvers
+modules.order
+.tmp_versions/
+vpnhide-kmod.zip
+.*.cmd
+*.usyms

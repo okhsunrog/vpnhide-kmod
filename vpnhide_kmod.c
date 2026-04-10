@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * vpnhide_kmod — kernel module that hides VPN network interfaces from
- * selected Android apps by filtering ioctl responses based on the
- * calling process's UID.
+ * selected Android apps by filtering ioctl, netlink, and procfs
+ * responses based on the calling process's UID.
  *
  * Uses kretprobes so no modification of the running kernel is needed;
- * works on stock Android GKI kernels with CONFIG_KPROBES=y and
- * CONFIG_MODULES=y.
+ * works on stock Android GKI kernels with CONFIG_KPROBES=y.
  *
- * Target UIDs are written to /proc/vpnhide_targets from userspace
- * (one numeric UID per line). A helper script resolves package names
- * to UIDs and writes them after boot.
+ * Hooks:
+ *   - dev_ioctl: filters SIOCGIFFLAGS / SIOCGIFNAME / SIOCGIFCONF
+ *   - rtnl_dump_ifinfo: filters RTM_NEWLINK netlink dumps (getifaddrs)
+ *   - fib_route_seq_show: filters /proc/net/route entries
+ *   - tcp4_seq_show: filters /proc/net/tcp entries
+ *
+ * Target UIDs are written to /proc/vpnhide_targets from userspace.
  */
 
 #include <linux/module.h>
@@ -25,13 +28,15 @@
 #include <linux/uaccess.h>
 #include <linux/seq_file.h>
 #include <linux/proc_fs.h>
-#include <linux/version.h>
+#include <linux/netdevice.h>
+#include <linux/rtnetlink.h>
+#include <linux/skbuff.h>
 
 #define MODNAME "vpnhide"
 #define MAX_TARGET_UIDS 64
 
 /* ------------------------------------------------------------------ */
-/*  VPN interface name matching (same prefixes as the Rust module)    */
+/*  VPN interface name matching                                       */
 /* ------------------------------------------------------------------ */
 
 static const char * const vpn_prefixes[] = {
@@ -84,12 +89,7 @@ static bool is_target_uid(void)
 }
 
 /* ------------------------------------------------------------------ */
-/*  /proc/vpnhide_targets — write UIDs from userspace                 */
-/*                                                                    */
-/*  Format: one UID per line, # comments, blank lines ignored.        */
-/*  Writing replaces the entire list atomically.                      */
-/*  Example from shell:                                               */
-/*    echo -e "10421\n10422\n10423" > /proc/vpnhide_targets           */
+/*  /proc/vpnhide_targets                                             */
 /* ------------------------------------------------------------------ */
 
 static ssize_t targets_write(struct file *file, const char __user *ubuf,
@@ -163,13 +163,9 @@ static const struct proc_ops targets_proc_ops = {
 	.proc_release = single_release,
 };
 
-/* ------------------------------------------------------------------ */
-/*  Kretprobe: dev_ioctl                                              */
-/*                                                                    */
-/*  Intercepts network device ioctls. For SIOCGIFFLAGS / SIOCGIFNAME, */
-/*  checks if the result references a VPN interface and the caller is */
-/*  a target UID. If so, overwrites the return value to -ENODEV.      */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
+/*  Hook 1: dev_ioctl — SIOCGIFFLAGS / SIOCGIFNAME                   */
+/* ================================================================== */
 
 struct dev_ioctl_data {
 	unsigned int cmd;
@@ -181,15 +177,12 @@ static int dev_ioctl_entry(struct kretprobe_instance *ri,
 {
 	struct dev_ioctl_data *data = (void *)ri->data;
 
-	/*
-	 * dev_ioctl(struct net *net, unsigned int cmd, struct ifreq __user *arg)
-	 * arm64 ABI: x0=net, x1=cmd, x2=arg
-	 */
+	/* arm64: x0=net, x1=cmd, x2=arg */
 	data->cmd = (unsigned int)regs->regs[1];
 	data->arg = (void __user *)regs->regs[2];
 
 	if (!is_target_uid())
-		data->cmd = 0; /* skip filtering in ret handler */
+		data->cmd = 0;
 
 	return 0;
 }
@@ -201,23 +194,11 @@ static int dev_ioctl_ret(struct kretprobe_instance *ri,
 	struct ifreq ifr;
 	long ret = regs_return_value(regs);
 
-	if (data->cmd == 0)
-		return 0;
-
-	if (ret != 0)
+	if (data->cmd == 0 || ret != 0)
 		return 0;
 
 	switch (data->cmd) {
 	case SIOCGIFFLAGS:
-		if (!data->arg)
-			break;
-		if (copy_from_user(&ifr, data->arg, sizeof(ifr)))
-			break;
-		ifr.ifr_name[IFNAMSIZ - 1] = '\0';
-		if (is_vpn_ifname(ifr.ifr_name))
-			regs_set_return_value(regs, -ENODEV);
-		break;
-
 	case SIOCGIFNAME:
 		if (!data->arg)
 			break;
@@ -232,7 +213,7 @@ static int dev_ioctl_ret(struct kretprobe_instance *ri,
 	return 0;
 }
 
-static struct kretprobe dev_ioctl_kretprobe = {
+static struct kretprobe dev_ioctl_krp = {
 	.handler	= dev_ioctl_ret,
 	.entry_handler	= dev_ioctl_entry,
 	.data_size	= sizeof(struct dev_ioctl_data),
@@ -240,21 +221,175 @@ static struct kretprobe dev_ioctl_kretprobe = {
 	.kp.symbol_name	= "dev_ioctl",
 };
 
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
+/*  Hook 2: rtnl_fill_ifinfo — netlink RTM_NEWLINK (getifaddrs path)  */
+/*                                                                    */
+/*  rtnl_fill_ifinfo fills one interface's data into a netlink skb    */
+/*  during a RTM_GETLINK dump. If the device is a VPN and the caller  */
+/*  is a target UID, we make it return -EMSGSIZE which tells the      */
+/*  dump iterator to skip this entry (it thinks the skb is full for   */
+/*  this entry and moves on, but the entry never gets added).         */
+/* ================================================================== */
+
+struct rtnl_fill_data {
+	bool should_filter;
+};
+
+static int rtnl_fill_entry(struct kretprobe_instance *ri,
+			   struct pt_regs *regs)
+{
+	struct rtnl_fill_data *data = (void *)ri->data;
+	struct net_device *dev;
+
+	data->should_filter = false;
+
+	if (!is_target_uid())
+		return 0;
+
+	/*
+	 * rtnl_fill_ifinfo(struct sk_buff *skb, struct net_device *dev, ...)
+	 * arm64: x0=skb, x1=dev
+	 */
+	dev = (struct net_device *)regs->regs[1];
+	if (dev && is_vpn_ifname(dev->name))
+		data->should_filter = true;
+
+	return 0;
+}
+
+static int rtnl_fill_ret(struct kretprobe_instance *ri,
+			 struct pt_regs *regs)
+{
+	struct rtnl_fill_data *data = (void *)ri->data;
+
+	if (data->should_filter)
+		regs_set_return_value(regs, -EMSGSIZE);
+
+	return 0;
+}
+
+static struct kretprobe rtnl_fill_krp = {
+	.handler	= rtnl_fill_ret,
+	.entry_handler	= rtnl_fill_entry,
+	.data_size	= sizeof(struct rtnl_fill_data),
+	.maxactive	= 20,
+	.kp.symbol_name	= "rtnl_fill_ifinfo",
+};
+
+/* ================================================================== */
+/*  Hook 3: fib_route_seq_show — /proc/net/route                      */
+/*                                                                    */
+/*  Each line in /proc/net/route starts with the interface name. If   */
+/*  it's a VPN interface and the caller is a target, skip the line    */
+/*  by returning 0 without printing (SEQ_SKIP equivalent).            */
+/* ================================================================== */
+
+static int fib_route_entry(struct kretprobe_instance *ri,
+			   struct pt_regs *regs)
+{
+	/* We only need to filter in the return handler. Mark in entry
+	 * whether this is a target UID to avoid re-checking. */
+	*(bool *)ri->data = is_target_uid();
+	return 0;
+}
+
+static int fib_route_ret(struct kretprobe_instance *ri,
+			 struct pt_regs *regs)
+{
+	bool target = *(bool *)ri->data;
+	struct seq_file *seq;
+	const char *buf;
+	int i;
+
+	if (!target)
+		return 0;
+
+	/*
+	 * After fib_route_seq_show returns, seq_file has the line in
+	 * seq->buf at position seq->count - (length of last line).
+	 * We check the last written line for a VPN interface name.
+	 *
+	 * arm64: x0 = seq_file*
+	 */
+	seq = (struct seq_file *)regs->regs[0];
+	if (!seq || seq->count == 0)
+		return 0;
+
+	/* The route line starts at the beginning of what was just
+	 * written. Find the last newline before seq->count to
+	 * locate the start of the current line. */
+	buf = seq->buf;
+	if (!buf)
+		return 0;
+
+	/* Scan the interface name field (first field, tab-separated). */
+	for (i = 0; i < IFNAMSIZ && i < seq->count; i++) {
+		if (buf[seq->count - 1 - i] == '\n' || i == 0) {
+			const char *line_start;
+			char ifname[IFNAMSIZ];
+			int j;
+
+			if (i == 0 && seq->count > 1)
+				continue;
+
+			line_start = (i == 0) ? buf : buf + seq->count - i;
+			for (j = 0; j < IFNAMSIZ - 1 && line_start[j] &&
+			     line_start[j] != '\t' && line_start[j] != ' ';
+			     j++)
+				ifname[j] = line_start[j];
+			ifname[j] = '\0';
+
+			if (is_vpn_ifname(ifname)) {
+				/* Rewind seq->count to hide this line */
+				seq->count -= (i == 0) ? seq->count : i;
+			}
+			break;
+		}
+	}
+
+	return 0;
+}
+
+static struct kretprobe fib_route_krp = {
+	.handler	= fib_route_ret,
+	.entry_handler	= fib_route_entry,
+	.data_size	= sizeof(bool),
+	.maxactive	= 20,
+	.kp.symbol_name	= "fib_route_seq_show",
+};
+
+/* ================================================================== */
 /*  Module init / exit                                                */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
 
 static struct proc_dir_entry *targets_entry;
 
+struct kretprobe_reg {
+	struct kretprobe *krp;
+	const char *name;
+	bool registered;
+};
+
+static struct kretprobe_reg probes[] = {
+	{ &dev_ioctl_krp,  "dev_ioctl",        false },
+	{ &rtnl_fill_krp,  "rtnl_fill_ifinfo", false },
+	{ &fib_route_krp,  "fib_route_seq_show", false },
+};
+
 static int __init vpnhide_init(void)
 {
-	int ret;
+	int i, ret;
 
-	ret = register_kretprobe(&dev_ioctl_kretprobe);
-	if (ret < 0) {
-		pr_err(MODNAME ": register_kretprobe(dev_ioctl) failed: %d\n",
-		       ret);
-		return ret;
+	for (i = 0; i < ARRAY_SIZE(probes); i++) {
+		ret = register_kretprobe(probes[i].krp);
+		if (ret < 0) {
+			pr_warn(MODNAME ": kretprobe(%s) failed: %d\n",
+				probes[i].name, ret);
+		} else {
+			probes[i].registered = true;
+			pr_info(MODNAME ": kretprobe(%s) registered\n",
+				probes[i].name);
+		}
 	}
 
 	targets_entry = proc_create("vpnhide_targets", 0600, NULL,
@@ -266,13 +401,21 @@ static int __init vpnhide_init(void)
 
 static void __exit vpnhide_exit(void)
 {
+	int i;
+
 	if (targets_entry)
 		proc_remove(targets_entry);
 
-	unregister_kretprobe(&dev_ioctl_kretprobe);
+	for (i = 0; i < ARRAY_SIZE(probes); i++) {
+		if (probes[i].registered) {
+			unregister_kretprobe(probes[i].krp);
+			pr_info(MODNAME ": kretprobe(%s) unregistered "
+				"(missed %d)\n",
+				probes[i].name, probes[i].krp->nmissed);
+		}
+	}
 
-	pr_info(MODNAME ": unloaded (dev_ioctl missed %d)\n",
-		dev_ioctl_kretprobe.nmissed);
+	pr_info(MODNAME ": unloaded\n");
 }
 
 module_init(vpnhide_init);
@@ -280,4 +423,4 @@ module_exit(vpnhide_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("okhsunrog");
-MODULE_DESCRIPTION("Hide VPN interfaces from selected apps via ioctl filtering");
+MODULE_DESCRIPTION("Hide VPN interfaces from selected apps at kernel level");

@@ -1,0 +1,6 @@
+id=vpnhide_kmod
+name=VPN Hide (kernel)
+version=v0.1.0
+versionCode=1
+author=okhsunrog
+description=Hides VPN interfaces from selected apps at the kernel level via kretprobe. Invisible to anti-tamper SDKs (MIR HCE). Supports NFC contactless payments. Manage targets via WebUI.
