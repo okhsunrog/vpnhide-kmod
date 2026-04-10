@@ -191,38 +191,62 @@ static int dev_ioctl_ret(struct kretprobe_instance *ri,
 			 struct pt_regs *regs)
 {
 	struct dev_ioctl_data *data = (void *)ri->data;
-	struct ifreq ifr;
 	long ret = regs_return_value(regs);
 
 	if (data->cmd == 0 || ret != 0)
 		return 0;
 
+	/*
+	 * dev_ioctl() signature on GKI 6.1:
+	 *   int dev_ioctl(struct net *net, unsigned int cmd,
+	 *                 struct ifreq *ifr, void __user *data,
+	 *                 bool *need_copyout)
+	 *
+	 * x2 = ifr is a KERNEL pointer (the caller already did
+	 * copy_from_user into a stack-local ifreq). We must NOT
+	 * use copy_from_user on it — ARM64 PAN would EFAULT.
+	 * Read via direct pointer dereference instead.
+	 *
+	 * x3 = data is the original __user pointer. For SIOCGIFCONF
+	 * we need this to patch the userspace buffer.
+	 */
+
 	switch (data->cmd) {
 	case SIOCGIFFLAGS:
-	case SIOCGIFNAME:
-		if (!data->arg)
+	case SIOCGIFNAME: {
+		struct ifreq *kifr = (struct ifreq *)data->arg;
+		char name[IFNAMSIZ];
+
+		if (!kifr)
 			break;
-		if (copy_from_user(&ifr, data->arg, sizeof(ifr)))
-			break;
-		ifr.ifr_name[IFNAMSIZ - 1] = '\0';
-		if (is_vpn_ifname(ifr.ifr_name))
+		memcpy(name, kifr->ifr_name, IFNAMSIZ);
+		name[IFNAMSIZ - 1] = '\0';
+		if (is_vpn_ifname(name))
 			regs_set_return_value(regs, -ENODEV);
 		break;
+	}
 
 	case SIOCGIFCONF: {
 		/*
-		 * SIOCGIFCONF returns a list of all interfaces in a
-		 * user-supplied buffer (struct ifconf). We walk the
-		 * returned ifreq array and compact out VPN entries.
+		 * SIOCGIFCONF is handled in sock_ioctl → dev_ifconf,
+		 * which has a different call path (not through dev_ioctl
+		 * on GKI 6.1). This case is kept for completeness but
+		 * may not fire. The actual SIOCGIFCONF filtering is
+		 * handled by a separate hook if needed.
+		 *
+		 * For SIOCGIFCONF that DOES come through dev_ioctl on
+		 * some kernels: the ifconf is in userspace, so we use
+		 * the __user pointer from x3.
 		 */
+		void __user *udata = (void __user *)regs->regs[3];
 		struct ifconf ifc;
 		struct ifreq __user *usr_ifr;
 		struct ifreq tmp;
 		int i, n, dst;
 
-		if (!data->arg)
+		if (!udata)
 			break;
-		if (copy_from_user(&ifc, data->arg, sizeof(ifc)))
+		if (copy_from_user(&ifc, udata, sizeof(ifc)))
 			break;
 		if (!ifc.ifc_req || ifc.ifc_len <= 0)
 			break;
@@ -236,7 +260,7 @@ static int dev_ioctl_ret(struct kretprobe_instance *ri,
 				break;
 			tmp.ifr_name[IFNAMSIZ - 1] = '\0';
 			if (is_vpn_ifname(tmp.ifr_name))
-				continue; /* skip VPN entry */
+				continue;
 			if (dst != i) {
 				if (copy_to_user(&usr_ifr[dst], &tmp,
 						 sizeof(tmp)))
@@ -245,10 +269,9 @@ static int dev_ioctl_ret(struct kretprobe_instance *ri,
 			dst++;
 		}
 
-		/* Update ifc_len to reflect the compacted count. */
 		if (dst < n) {
 			ifc.ifc_len = dst * (int)sizeof(struct ifreq);
-			if (copy_to_user(data->arg, &ifc, sizeof(ifc)))
+			if (copy_to_user(udata, &ifc, sizeof(ifc)))
 				break;
 		}
 		break;
