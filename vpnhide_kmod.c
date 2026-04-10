@@ -37,6 +37,7 @@
 #include <linux/skbuff.h>
 #include <linux/inetdevice.h>
 #include <net/addrconf.h>
+#include <net/ip_fib.h>
 
 #define MODNAME "vpnhide"
 #define MAX_TARGET_UIDS 64
@@ -726,64 +727,65 @@ static struct kretprobe tcp6_seq_krp = {
 };
 
 /* ================================================================== */
-/*  Hook 8: fib_dump_info — netlink RTM_GETROUTE (best-effort)        */
+/*  Hook 8: fib_dump_info — netlink RTM_GETROUTE                      */
 /*                                                                    */
-/*  fib_dump_info fills one IPv4 route entry into a netlink skb.      */
-/*  It receives a fib_rt_info whose fi→fib_dev is the output device.  */
-/*  If the device is a VPN and the caller is a target, return         */
-/*  -EMSGSIZE to skip the entry (same trick as rtnl_fill_ifinfo).     */
+/*  fib_dump_info(struct sk_buff *skb, u32 portid, u32 seq,           */
+/*                int event, const struct fib_rt_info *fri,            */
+/*                unsigned int flags)                                  */
+/*  Non-static on GKI 6.1. arm64: x4 = fri.                          */
 /*                                                                    */
-/*  This symbol may be static on some kernel builds; if registration  */
-/*  fails the module continues without this hook.                     */
+/*  Path to output device (confirmed for kernel 6.1):                 */
+/*    fri→fi→fib_nh[0].nh_common.nhc_dev→name                        */
+/*  (when fi→nh == NULL; otherwise nexthop objects are used — we      */
+/*  skip filtering for those since they're rare on Android).          */
+/*                                                                    */
+/*  Same -EMSGSIZE trick as rtnl_fill_ifinfo.                         */
 /* ================================================================== */
-
-struct fib_dump_data {
-	bool should_filter;
-};
 
 static int fib_dump_entry(struct kretprobe_instance *ri,
 			  struct pt_regs *regs)
 {
-	struct fib_dump_data *data = (void *)ri->data;
+	struct rtnl_fill_data *data = (void *)ri->data;
+	struct fib_rt_info *fri;
+	struct fib_info *fi;
+	struct net_device *dev;
 
 	data->should_filter = false;
 
 	if (!is_target_uid())
 		return 0;
 
-	/*
-	 * fib_dump_info(struct sk_buff *skb, u32 portid, u32 seq,
-	 *               int event, const struct fib_rt_info *fri,
-	 *               unsigned int flags)
-	 * arm64: x4 = fri
-	 *
-	 * We don't dereference fri→fi→fib_dev here because the
-	 * struct layout can change between GKI versions. Instead,
-	 * we check the return value and the skb content in the
-	 * return handler — but that's complex. For now, simply
-	 * mark for filtering and check the device in the output.
-	 *
-	 * TODO: dereference fri→fi→fib_dev when struct offsets are
-	 * confirmed for the target GKI version.
-	 */
-	(void)regs;
+	/* arm64: x4 = fri */
+	fri = (struct fib_rt_info *)regs->regs[4];
+	if (!fri)
+		return 0;
+
+	fi = fri->fi;
+	if (!fi || fi->fib_nhs < 1 || fi->nh)
+		return 0; /* nexthop objects — skip */
+
+	dev = fi->fib_nh[0].nh_common.nhc_dev;
+	if (dev && is_vpn_ifname(dev->name))
+		data->should_filter = true;
+
 	return 0;
 }
 
 static int fib_dump_ret(struct kretprobe_instance *ri,
 			struct pt_regs *regs)
 {
-	(void)ri;
-	(void)regs;
-	/* Placeholder — full implementation requires confirmed
-	 * fib_rt_info struct layout for the target GKI version. */
+	struct rtnl_fill_data *data = (void *)ri->data;
+
+	if (data->should_filter)
+		regs_set_return_value(regs, -EMSGSIZE);
+
 	return 0;
 }
 
 static struct kretprobe fib_dump_krp = {
 	.handler	= fib_dump_ret,
 	.entry_handler	= fib_dump_entry,
-	.data_size	= sizeof(struct fib_dump_data),
+	.data_size	= sizeof(struct rtnl_fill_data),
 	.maxactive	= 20,
 	.kp.symbol_name	= "fib_dump_info",
 };
