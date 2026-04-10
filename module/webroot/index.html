@@ -157,6 +157,7 @@
   const PERSIST_DIR = `/data/adb/${MODULE_ID}`;
   const TARGETS_PATH = `${PERSIST_DIR}/targets.txt`;
   const PROC_TARGETS = '/proc/vpnhide_targets';
+  const SS_UIDS_FILE = '/data/system/vpnhide_uids.txt';
 
   const listEl = document.getElementById('list');
   const searchEl = document.getElementById('search');
@@ -288,7 +289,12 @@
       const resolveScript = selected.map(pkg =>
         `uid=$(pm list packages -U "${pkg}" 2>/dev/null | grep "^package:${pkg} " | sed 's/.*uid://'); [ -n "$uid" ] && echo "$uid"`
       ).join('; ');
-      const cmd = `mkdir -p ${PERSIST_DIR} && echo '${b64}' | base64 -d > ${TARGETS_PATH} && chmod 644 ${TARGETS_PATH} && { ${resolveScript}; } > ${PROC_TARGETS} 2>/dev/null`;
+      // Write to three places:
+      // 1. targets.txt — persistent package names (survives updates)
+      // 2. /proc/vpnhide_targets — kernel module (immediate)
+      // 3. /data/system/vpnhide_uids.txt — system_server LSPosed hooks
+      //    (FileObserver/inotify triggers cache invalidation, no reboot)
+      const cmd = `mkdir -p ${PERSIST_DIR} && echo '${b64}' | base64 -d > ${TARGETS_PATH} && chmod 644 ${TARGETS_PATH} && UIDS=$(${resolveScript}) && echo "$UIDS" > ${PROC_TARGETS} 2>/dev/null && echo "$UIDS" > ${SS_UIDS_FILE} && chmod 644 ${SS_UIDS_FILE} && chcon u:object_r:system_data_file:s0 ${SS_UIDS_FILE} 2>/dev/null`;
       const res = await ksuExec(cmd);
       if (res.errno !== 0) {
         throw new Error(res.stderr || `errno=${res.errno}`);
