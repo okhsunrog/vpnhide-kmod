@@ -1,14 +1,20 @@
 #!/system/bin/sh
-# Runs after boot-completed, when PackageManager is available.
 # Resolves package names → UIDs and writes to /proc/vpnhide_targets.
+# KSU may run this before PackageManager is fully ready, so we wait.
 
 PERSIST_DIR="/data/adb/vpnhide_kmod"
 TARGETS_FILE="$PERSIST_DIR/targets.txt"
 PROC_TARGETS="/proc/vpnhide_targets"
 
-# Wait for the proc entry to appear (module must be loaded)
-for i in 1 2 3 4 5; do
+# Wait for the proc entry (kernel module must be loaded)
+for i in 1 2 3 4 5 6 7 8 9 10; do
     [ -f "$PROC_TARGETS" ] && break
+    sleep 1
+done
+
+# Wait for PackageManager to be ready
+for i in $(seq 1 30); do
+    pm list packages >/dev/null 2>&1 && break
     sleep 1
 done
 
