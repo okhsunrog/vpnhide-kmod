@@ -50,6 +50,23 @@ static const char * const vpn_prefixes[] = {
 	"tun", "ppp", "tap", "wg", "ipsec", "xfrm", "utun", "l2tp", "gre",
 };
 
+/* Case-insensitive substring search — kernel has no strcasestr. */
+static bool strnstr_nocase(const char *haystack, const char *needle,
+			   size_t hlen)
+{
+	size_t nlen = strlen(needle);
+	size_t i;
+
+	if (nlen > hlen)
+		return false;
+
+	for (i = 0; i <= hlen - nlen; i++) {
+		if (strncasecmp(haystack + i, needle, nlen) == 0)
+			return true;
+	}
+	return false;
+}
+
 static bool is_vpn_ifname(const char *name)
 {
 	int i;
@@ -62,7 +79,7 @@ static bool is_vpn_ifname(const char *name)
 				strlen(vpn_prefixes[i])) == 0)
 			return true;
 	}
-	if (strcasestr(name, "vpn"))
+	if (strnstr_nocase(name, "vpn", strlen(name)))
 		return true;
 
 	return false;
@@ -474,14 +491,6 @@ static int fib_route_ret(struct kretprobe_instance *ri,
 	return 0;
 }
 
-static struct kretprobe fib_route_krp = {
-	.handler	= fib_route_ret,
-	.entry_handler	= seq_hide_entry,
-	.data_size	= sizeof(struct seq_hide_data),
-	.maxactive	= 20,
-	.kp.symbol_name	= "fib_route_seq_show",
-};
-
 /* ================================================================== */
 /*  Shared seq_file entry handler — saves is_target + old seq->count  */
 /*  Reused by hooks 3–7 which all follow the same pattern.            */
@@ -505,6 +514,14 @@ static int seq_hide_entry(struct kretprobe_instance *ri,
 
 	return 0;
 }
+
+static struct kretprobe fib_route_krp = {
+	.handler	= fib_route_ret,
+	.entry_handler	= seq_hide_entry,
+	.data_size	= sizeof(struct seq_hide_data),
+	.maxactive	= 20,
+	.kp.symbol_name	= "fib_route_seq_show",
+};
 
 /*
  * Helper: extract the last whitespace-delimited field from a line.
