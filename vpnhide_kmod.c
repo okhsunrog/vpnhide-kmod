@@ -208,6 +208,51 @@ static int dev_ioctl_ret(struct kretprobe_instance *ri,
 		if (is_vpn_ifname(ifr.ifr_name))
 			regs_set_return_value(regs, -ENODEV);
 		break;
+
+	case SIOCGIFCONF: {
+		/*
+		 * SIOCGIFCONF returns a list of all interfaces in a
+		 * user-supplied buffer (struct ifconf). We walk the
+		 * returned ifreq array and compact out VPN entries.
+		 */
+		struct ifconf ifc;
+		struct ifreq __user *usr_ifr;
+		struct ifreq tmp;
+		int i, n, dst;
+
+		if (!data->arg)
+			break;
+		if (copy_from_user(&ifc, data->arg, sizeof(ifc)))
+			break;
+		if (!ifc.ifc_req || ifc.ifc_len <= 0)
+			break;
+
+		n = ifc.ifc_len / (int)sizeof(struct ifreq);
+		usr_ifr = ifc.ifc_req;
+		dst = 0;
+
+		for (i = 0; i < n; i++) {
+			if (copy_from_user(&tmp, &usr_ifr[i], sizeof(tmp)))
+				break;
+			tmp.ifr_name[IFNAMSIZ - 1] = '\0';
+			if (is_vpn_ifname(tmp.ifr_name))
+				continue; /* skip VPN entry */
+			if (dst != i) {
+				if (copy_to_user(&usr_ifr[dst], &tmp,
+						 sizeof(tmp)))
+					break;
+			}
+			dst++;
+		}
+
+		/* Update ifc_len to reflect the compacted count. */
+		if (dst < n) {
+			ifc.ifc_len = dst * (int)sizeof(struct ifreq);
+			if (copy_to_user(data->arg, &ifc, sizeof(ifc)))
+				break;
+		}
+		break;
+	}
 	}
 
 	return 0;
