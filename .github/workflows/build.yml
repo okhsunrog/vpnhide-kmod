@@ -19,19 +19,24 @@ jobs:
           # Add more generations here as symvers files are committed:
           # - branch: android13-5.15
           #   symvers: symvers/android13-5.15.symvers
-          # - branch: android15-6.6
-          #   symvers: symvers/android15-6.6.symvers
 
     steps:
       - name: Checkout vpnhide-kmod
         uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              bc kmod clang lld llvm \
+              binutils-aarch64-linux-gnu
 
       - name: Cache kernel source
         uses: actions/cache@v4
         id: kernel-cache
         with:
           path: kernel-source
-          key: kernel-${{ matrix.gki.branch }}
+          key: kernel-${{ matrix.gki.branch }}-v1
 
       - name: Clone kernel source (shallow)
         if: steps.kernel-cache.outputs.cache-hit != 'true'
@@ -40,64 +45,24 @@ jobs:
               https://android.googlesource.com/kernel/common \
               kernel-source
 
-      - name: Cache clang toolchain
-        uses: actions/cache@v4
-        id: clang-cache
-        with:
-          path: android-clang
-          key: android-clang-r487747c
-
-      - name: Download Android clang toolchain
-        if: steps.clang-cache.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p android-clang
-          # Use the prebuilt clang from Google's CI artifacts
-          CLANG_URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r487747c.tar.gz"
-          curl -L "$CLANG_URL" | tar xz -C android-clang 2>/dev/null || {
-            # Fallback: build with system clang + cross-compile target
-            echo "Prebuilt clang download failed, trying AOSP mirror..."
-            # Clone just the clang directory
-            git clone --depth=1 --filter=blob:none --sparse \
-                https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
-                android-clang-repo
-            cd android-clang-repo && git sparse-checkout set clang-r487747c
-            mv clang-r487747c/* ../android-clang/ 2>/dev/null || true
-            cd .. && rm -rf android-clang-repo
-          }
-          # Verify clang exists
-          ls android-clang/bin/clang
-
-      - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bc kmod
-
       - name: Prepare kernel source
         run: |
-          KSRC=$GITHUB_WORKSPACE/kernel-source
-          CLANG=$GITHUB_WORKSPACE/android-clang/bin
+          cd kernel-source
 
-          cd "$KSRC"
-
-          # Use GKI defconfig
+          # GKI defconfig — use system clang with LLVM=1
           make ARCH=arm64 LLVM=1 LLVM_IAS=1 \
-              CC=$CLANG/clang LD=$CLANG/ld.lld AR=$CLANG/llvm-ar \
-              NM=$CLANG/llvm-nm OBJCOPY=$CLANG/llvm-objcopy \
-              OBJDUMP=$CLANG/llvm-objdump STRIP=$CLANG/llvm-strip \
               CROSS_COMPILE=aarch64-linux-gnu- \
               gki_defconfig
 
-          # Create empty ABI symbol list
           touch abi_symbollist.raw
 
           # Prepare headers (ignore resolve_btfids failure)
           make ARCH=arm64 LLVM=1 LLVM_IAS=1 \
-              CC=$CLANG/clang LD=$CLANG/ld.lld AR=$CLANG/llvm-ar \
-              NM=$CLANG/llvm-nm OBJCOPY=$CLANG/llvm-objcopy \
-              OBJDUMP=$CLANG/llvm-objdump STRIP=$CLANG/llvm-strip \
               CROSS_COMPILE=aarch64-linux-gnu- \
               olddefconfig prepare || true
 
           # Generate module.lds
-          $CLANG/clang -E -Wp,-MD,scripts/.module.lds.d -nostdinc \
+          clang -E -Wp,-MD,scripts/.module.lds.d -nostdinc \
               -I arch/arm64/include -I arch/arm64/include/generated \
               -I include -I include/generated \
               -include include/linux/kconfig.h \
@@ -106,10 +71,10 @@ jobs:
               2>/dev/null | grep -v '^#' > scripts/module.lds
           sed -i 's/((1UL) << 12)/4096/g' scripts/module.lds
 
-          # Copy Module.symvers from committed file
+          # Module.symvers from committed file
           cp "$GITHUB_WORKSPACE/${{ matrix.gki.symvers }}" Module.symvers
 
-          # Set placeholder vermagic (KernelSU bypasses check)
+          # Placeholder vermagic (KernelSU bypasses check)
           PLACEHOLDER="6.1.999-placeholder-$(printf 'x%.0s' $(seq 1 100))"
           echo "#define UTS_RELEASE \"$PLACEHOLDER\"" \
               > include/generated/utsrelease.h
@@ -117,29 +82,20 @@ jobs:
 
       - name: Build kernel module
         run: |
-          KSRC=$GITHUB_WORKSPACE/kernel-source
-          CLANG=$GITHUB_WORKSPACE/android-clang/bin
-
-          make -C "$KSRC" M=$GITHUB_WORKSPACE \
+          make -C kernel-source M=$GITHUB_WORKSPACE \
               ARCH=arm64 LLVM=1 LLVM_IAS=1 \
-              CC=$CLANG/clang LD=$CLANG/ld.lld \
-              AR=$CLANG/llvm-ar NM=$CLANG/llvm-nm \
-              OBJCOPY=$CLANG/llvm-objcopy \
-              OBJDUMP=$CLANG/llvm-objdump \
-              STRIP=$CLANG/llvm-strip \
               CROSS_COMPILE=aarch64-linux-gnu- \
               modules
-
           ls -lh vpnhide_kmod.ko
 
       - name: Package KSU module zip
+        id: package
         run: |
           cp vpnhide_kmod.ko module/
           ZIPNAME="vpnhide-kmod-${{ matrix.gki.branch }}.zip"
           (cd module && zip -qr "../$ZIPNAME" .)
           ls -lh "$ZIPNAME"
           echo "zipname=$ZIPNAME" >> "$GITHUB_OUTPUT"
-        id: package
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
