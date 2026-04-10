@@ -250,12 +250,15 @@ On boot:
 ### Picking target apps
 
 **WebUI (recommended):** open the module in KernelSU-Next manager
-and tap the WebUI entry. Select apps, save. UIDs are written to
-`/proc/vpnhide_targets` immediately (no reboot needed). The WebUI
-also writes resolved UIDs to `/data/system/vpnhide_uids.txt` for the
-[vpnhide](https://github.com/okhsunrog/vpnhide) LSPosed module's
-system_server hooks. Changes apply immediately to both kernel module
-and system_server hooks via inotify — no reboot needed.
+and tap the WebUI entry. Select apps, save. The WebUI writes to
+**three places** simultaneously:
+1. `targets.txt` — persistent package names (survives module updates)
+2. `/proc/vpnhide_targets` — resolved UIDs for the kernel module
+3. `/data/system/vpnhide_uids.txt` — resolved UIDs for the
+   [vpnhide](https://github.com/okhsunrog/vpnhide) LSPosed module's
+   system_server hooks (live reload via inotify)
+
+All changes apply immediately — no reboot needed.
 
 **Shell:**
 ```bash
