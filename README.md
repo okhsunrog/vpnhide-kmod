@@ -9,13 +9,19 @@ anonymous memory regions — making it invisible to anti-tamper SDKs
 such as NSPK's MIR HCE (used in Russian banking apps for NFC
 contactless payments).
 
-Companion to [okhsunrog/vpnhide](https://github.com/okhsunrog/vpnhide)
-(LSPosed, Java API) and
-[okhsunrog/vpnhide-zygisk](https://github.com/okhsunrog/vpnhide-zygisk)
-(Zygisk, libc inline hooks). This module covers the same native
-detection paths as vpnhide-zygisk but at the kernel level, so it
-works for apps where userspace hooks trigger anti-tamper crashes or
-silent NFC payment degradation.
+Part of a three-module suite for hiding VPN on Android:
+
+- [okhsunrog/vpnhide](https://github.com/okhsunrog/vpnhide) — LSPosed
+  module for Java API hooks. Has app-process mode (default) and
+  system_server mode (for MIR SDK apps, managed through this module's
+  WebUI).
+- [okhsunrog/vpnhide-zygisk](https://github.com/okhsunrog/vpnhide-zygisk)
+  — Zygisk module for libc inline hooks (`ioctl`, `getifaddrs`). Works
+  for apps without anti-tamper SDKs.
+- **This module** — kernel-level kretprobes covering the same native
+  detection paths as vpnhide-zygisk, but with zero footprint in
+  userspace. Required for apps where userspace hooks trigger anti-tamper
+  crashes or silent NFC payment degradation.
 
 ## What it hooks
 
@@ -71,11 +77,8 @@ for `android14-6.1`. All symbols it uses (`register_kretprobe`,
 so the same `Module.symvers` CRCs work across all devices running
 the same GKI generation.
 
-The `.ko` ships with a long placeholder `vermagic` string (120
-chars). At boot time, `post-fs-data.sh` reads `uname -r` and
-patches the vermagic in the binary before `insmod`, so one `.ko`
-works on any device within the same GKI generation regardless of
-the exact kernel build ID.
+KernelSU bypasses the kernel's vermagic check, so no runtime
+patching is needed. `post-fs-data.sh` simply runs `insmod` directly.
 
 ### Current build target
 
@@ -239,8 +242,7 @@ cp vpnhide_kmod.ko module/
 3. Reboot
 
 On boot:
-- `post-fs-data.sh` patches the vermagic in the `.ko` to match
-  `uname -r`, then runs `insmod`
+- `post-fs-data.sh` runs `insmod` to load the kernel module
 - `service.sh` resolves package names from
   `/data/adb/vpnhide_kmod/targets.txt` to UIDs via
   `pm list packages -U` and writes them to `/proc/vpnhide_targets`
@@ -249,7 +251,11 @@ On boot:
 
 **WebUI (recommended):** open the module in KernelSU-Next manager
 and tap the WebUI entry. Select apps, save. UIDs are written to
-`/proc/vpnhide_targets` immediately (no reboot needed).
+`/proc/vpnhide_targets` immediately (no reboot needed). The WebUI
+also writes resolved UIDs to `/data/system/vpnhide_uids.txt` for the
+[vpnhide](https://github.com/okhsunrog/vpnhide) LSPosed module's
+system_server hooks. Changes apply immediately to both kernel module
+and system_server hooks via inotify — no reboot needed.
 
 **Shell:**
 ```bash
@@ -267,6 +273,41 @@ adb push vpnhide_kmod.ko /data/local/tmp/
 adb shell su -c 'insmod /data/local/tmp/vpnhide_kmod.ko'
 adb shell su -c 'echo 10423 > /proc/vpnhide_targets'
 ```
+
+## Combined use with system_server hooks
+
+For banking apps with MIR HCE SDK (Alfa-Bank, T-Bank, Yandex Bank),
+full VPN hiding requires covering both native and Java API detection
+paths — without placing any hooks in the banking app's process:
+
+- **vpnhide-kmod** (this module) covers the native side: `ioctl`
+  (`SIOCGIFFLAGS` / `SIOCGIFNAME` / `SIOCGIFCONF`), `getifaddrs()`
+  (via `rtnl_fill_ifinfo`), and `/proc/net/route` (via
+  `fib_route_seq_show`).
+- **[vpnhide](https://github.com/okhsunrog/vpnhide) system_server
+  hooks** cover the Java API side: `NetworkCapabilities.writeToParcel()`,
+  `NetworkInfo.writeToParcel()`, `LinkProperties.writeToParcel()` —
+  stripping VPN data before Binder serialization reaches the app.
+
+Together they provide complete VPN hiding for banking apps without any
+hooks in the bank's process. The MIR SDK cannot detect either
+component.
+
+### Setup
+
+1. Install **vpnhide-kmod** as a KSU module (this module).
+2. Install **[vpnhide](https://github.com/okhsunrog/vpnhide)** as an
+   LSPosed/Vector module and add **"System Framework"** to its scope.
+3. Pick target apps in vpnhide-kmod's WebUI — it manages targets for
+   both the kernel module and the system_server hooks.
+4. **Remove** banking apps from vpnhide's LSPosed app-process scope
+   (if they were added previously). Only "System Framework" should be
+   in scope for MIR SDK apps — loading the module into the banking
+   app's process will trigger MIR SDK's anti-tamper detection.
+
+For non-MIR-SDK apps, the standard combination of vpnhide (app-process
+hooks) + vpnhide-zygisk provides more complete Java + native coverage
+and does not require this kernel module.
 
 ## Architecture notes
 
@@ -316,10 +357,9 @@ userspace.
       VPN clients with open local ports
 - [ ] `connect()` filter on localhost proxy ports (`__sys_connect`)
       — same caveat as above
-- [ ] system_server LSPosed hooks for Java API coverage
-      (`ConnectivityManager.hasTransport(TRANSPORT_VPN)` etc.) on
-      MIR SDK apps — the kernel module can't cover Java framework
-      state, so this is the remaining gap for full bank-app coverage
+- [x] ~~system_server LSPosed hooks~~ — implemented in
+      [okhsunrog/vpnhide](https://github.com/okhsunrog/vpnhide) and
+      managed through this module's WebUI
 
 ## License
 
